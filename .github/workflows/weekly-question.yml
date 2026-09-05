@@ -107,3 +107,5 @@ jobs:
             --label interview-question \
             --assignee "$OWNER"
           echo "Issue 已创建：$TITLE"
+
+# reindex
