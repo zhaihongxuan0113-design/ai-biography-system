@@ -35,13 +35,18 @@
   ```python
   from crisperwhisper import CrisperWhisperModel
   model = CrisperWhisperModel("small", backend="transformers", device="cpu", compute_type="float32")
-  result = model.transcribe("录音.wav", language="zh", mode="verbatim", word_timestamps=True)
-  # result.text：完整转写文本；result.words：逐词 WordTimestamp(word, start, end)；
+  result = model.transcribe(
+      "录音.wav", language="zh", mode="verbatim", word_timestamps=True,
+      longform_strategy="token_lcs", chunk_duration=30.0, stride=30.0,
+  )
+  # result.chunks：每个 30 秒分段（ChunkResult：start_sec / end_sec / text，文本干净）；
+  # result.words：逐词 WordTimestamp(word, start, end)，仅用于时间戳与停顿标注；
   # result.duration：音频时长；result.processing_time：模型处理耗时
   ```
-- 输出：由脚本按 `result.words` 生成带 `[MM:SS]` 时间戳的 Markdown（不再是 srt 文件）
+- 输出：由脚本按 `result.chunks` 分段文本 + `result.words` 逐词时间生成带 `[MM:SS]` 时间戳的 Markdown（不再是 srt 文件）
 - 英文情绪标签自动换算：`[laughter]`→`[笑]`、`[sigh]`→`[叹气]`、`[cough]`→`[咳嗽]` 等；填充词 `[UM]`/`[UH]`→「嗯，」「啊，」；模型误报的非言语标签（`[crying]` `[scream]` `[sneeze]` 等）自动剔除
-- 正文取整段解码的 `result.text`（避免逐词切分导致的中文 U+FFFD 乱码），`result.words` 仅用于行首时间戳与停顿（>1.2 秒插入「……」）标注
+- 正文取 token_lcs 分段整段解码的 `result.chunks[].text`（无乱码）；`result.words` 仅用于行首时间戳与停顿（>1.2 秒行尾补「……」）标注
+- v3 修正（内测排障结论）：continuation+幻觉修复会把 CJK 字节级 token 回卷切半、产生 U+FFFD 乱码；改用 token_lcs 无重叠分段后正文干净；空格分隔的连续语气词（如「啊， 啊， 啊，」）自动合并为一次
 
 ## 许可提示（内部测试备忘）
 - 推理代码 MIT；标准模型权重为非商业研究许可，Pro 模型需商业许可。正式商用前需联系 Nyra 获取授权。
