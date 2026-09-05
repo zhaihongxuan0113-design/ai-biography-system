@@ -11,6 +11,13 @@ v3 说明：
 - 正文直接取各 chunk 的干净文本；行时间戳与「……」停顿来自逐词时间戳（词文本可能有乱码，
   只用于取时间，不影响正文）；
 - [UH]/[UM] 等填充词标签换算成「啊，/嗯，」后，合并连续重复（含空格分隔的重复）。
+
+v4 说明（真人录音测试前置优化）：
+- 真人老年语音慢语速、停顿多：停顿标注阈值由 1.2 秒收紧到 0.8 秒（PAUSE_SEC = 0.8）；
+- 支持「真人测试_」文件名前缀：真人录音统一命名如「真人测试_第1周_问题1_20260906.m4a」，
+  输出转写稿加同一前缀「真人测试_第1周_问题1_转写.md」，与模拟测试文件互不覆盖；
+- 语言仍强制 zh；标点与断句由 Whisper 模型自带能力输出（不做二次加工）；
+- verbatim 逐字模式不变：口头禅、语气词、重复、说一半的话全部保留，不修正语法、不删跑题内容。
 """
 import json
 import re
@@ -46,7 +53,8 @@ METRICS = Path('tests/metrics.json')
 
 MODEL_SIZE = 'small'
 LANGUAGE = 'zh'
-PAUSE_SEC = 1.2
+# 真人老年语音：慢语速、停顿多，1.2 秒阈值会漏标停顿；收紧到 0.8 秒更贴近真实呼吸节奏
+PAUSE_SEC = 0.8
 MAX_LINE_CHARS = 60
 
 # verbatim 模式的英文情绪标签统一换算成中文标注（《语气保留指南》约定）
@@ -105,14 +113,16 @@ def save_metrics(m):
 
 
 def parse_week_q(stem):
-    m = re.match(r'第(\d+)周_问题(\d+)', stem)
+    """解析周次与问题号。返回 (week, q, is_real)。
+    is_real=True 表示文件名带「真人测试_」前缀（真人录音），输出文件也加同一前缀。"""
+    m = re.match(r'^(真人测试_)?第(\d+)周_问题(\d+)', stem)
     if m:
-        return int(m.group(1)), int(m.group(2))
-    m = re.match(r'录音0*(\d+)', stem)
+        return int(m.group(2)), int(m.group(3)), bool(m.group(1))
+    m = re.match(r'^(真人测试_)?录音0*(\d+)', stem)
     if m:
-        n = int(m.group(1))
-        return (n + 1) // 2, n
-    return 0, 0
+        n = int(m.group(2))
+        return (n + 1) // 2, n, bool(m.group(1))
+    return 0, 0, False
 
 
 def fmt_ts(sec):
@@ -234,11 +244,14 @@ def main():
     )
     done_any = False
     for f in files:
-        week, q = parse_week_q(f.stem)
+        week, q, is_real = parse_week_q(f.stem)
         if not week:
             print('跳过（无法解析周次/问题号）:', f.name)
             continue
-        target = OUT / ('第%d周_问题%d_测试长者001_转写.md' % (week, q))
+        if is_real:
+            target = OUT / ('真人测试_第%d周_问题%d_转写.md' % (week, q))
+        else:
+            target = OUT / ('第%d周_问题%d_测试长者001_转写.md' % (week, q))
         if target.exists():
             print('已存在，跳过:', target.name)
             continue
@@ -266,8 +279,12 @@ def main():
         proc_sec = round(float(getattr(result, 'processing_time', 0.0)), 1)
         wall_sec = round(time.time() - t0, 1)
         word_count = len(words) or len(raw_text.split())
+        if is_real:
+            title = '# 真人测试 · 第%d周 问题%d · 转写稿' % (week, q)
+        else:
+            title = '# 第%d周 问题%d · 测试长者001 · 转写稿' % (week, q)
         header = [
-            '# 第%d周 问题%d · 测试长者001 · 转写稿' % (week, q),
+            title,
             '',
             '> 来源录音：`tests/fixtures/%s`' % f.name,
             '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，continuation 分段，CPU）' % (MODEL_SIZE, LANGUAGE),
