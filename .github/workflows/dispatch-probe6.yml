@@ -1,0 +1,61 @@
+# 每周访谈问题自动发送（周一、周四各 1 问，对应《访谈提纲》50 周计划）
+# 通知方式：创建仓库 Issue（标签 interview-question）+ 自动指派仓库所有者触发 GitHub 邮件通知，免费且不会进垃圾短信。
+
+name: probe6
+
+on:
+  schedule:
+    # 北京时间每周一、周四 09:00（UTC 01:00）
+    - cron: '0 1 * * 1,4'
+  workflow_dispatch:
+    inputs:
+      question_number:
+        description: '手动指定问题序号（1-100），留空则自动取下一个未发送的问题'
+        required: false
+        default: ''
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: weekly-question
+  cancel-in-progress: false
+
+jobs:
+  send-question:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      OWNER: ${{ github.repository_owner }}
+      PAGES_URL: https://zhaihongxuan0113-design.github.io/ai-biography-system/
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 确保标签 interview-question 存在
+        run: |
+          gh label create interview-question \
+            --repo "$REPO" \
+            --description "每周自动发送的访谈问题" \
+            --color 0e8a16 || true
+
+      - name: 计算下一个问题序号（已发送数 = 该标签下 Issue 总数）
+        id: next
+        run: |
+          count=$(gh issue list --repo "$REPO" --label interview-question --state all --limit 200 --json number | jq 'length')
+          next=$((count + 1))
+          if [ -n "${{ inputs.question_number }}" ]; then
+            next="${{ inputs.question_number }}"
+          fi
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "本次发送：第 $next 问"
+
+      - name: 生成问题内容并创建 Issue（指派仓库所有者 → 触发邮件通知）
+        env:
+          NEXT: ${{ steps.next.outputs.next }}
+        run: |
+          echo "heredoc replaced: NEXT=$NEXT"
+          gh issue create --repo "$REPO" --title "probe6 测试" --body "probe6 body" --label interview-question --assignee "$OWNER" || true
