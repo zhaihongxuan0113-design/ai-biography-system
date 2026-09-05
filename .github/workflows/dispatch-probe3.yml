@@ -1,0 +1,30 @@
+# 每周访谈问题自动发送（周一、周四各 1 问，对应《访谈提纲》50 周计划）
+# 通知方式：创建仓库 Issue（标签 interview-question）+ 自动指派仓库所有者触发 GitHub 邮件通知，免费且不会进垃圾短信。
+
+name: 每周访谈问题自动发送
+
+on:
+  schedule:
+    # 北京时间每周一、周四 09:00（UTC 01:00）
+    - cron: '0 1 * * 1,4'
+  workflow_dispatch:
+    inputs:
+      question_number:
+        description: '手动指定问题序号（1-100），留空则自动取下一个未发送的问题'
+        required: false
+        default: ''
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: weekly-question
+  cancel-in-progress: false
+
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo probe3-ok
