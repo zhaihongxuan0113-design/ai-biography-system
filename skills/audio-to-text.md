@@ -40,7 +40,8 @@
   # result.duration：音频时长；result.processing_time：模型处理耗时
   ```
 - 输出：由脚本按 `result.words` 生成带 `[MM:SS]` 时间戳的 Markdown（不再是 srt 文件）
-- 英文情绪标签自动换算：`[laughter]`→`[笑]`、`[sigh]`→`[叹气]`、`[cough]`→`[咳嗽]` 等
+- 英文情绪标签自动换算：`[laughter]`→`[笑]`、`[sigh]`→`[叹气]`、`[cough]`→`[咳嗽]` 等；填充词 `[UM]`/`[UH]`→「嗯，」「啊，」；模型误报的非言语标签（`[crying]` `[scream]` `[sneeze]` 等）自动剔除
+- 正文取整段解码的 `result.text`（避免逐词切分导致的中文 U+FFFD 乱码），`result.words` 仅用于行首时间戳与停顿（>1.2 秒插入「……」）标注
 
 ## 许可提示（内部测试备忘）
 - 推理代码 MIT；标准模型权重为非商业研究许可，Pro 模型需商业许可。正式商用前需联系 Nyra 获取授权。
