@@ -5,8 +5,9 @@
 依赖：pip install "crisperwhisper[transformers]"（PyPI 包名为 crisperwhisper，无连字符）。
 
 v3 说明：
-- 长音频改用 token_lcs 策略（chunk 30 秒、stride 30 秒、无重叠），避免 continuation+幻觉修复
-  把 CJK 字节级 token 回卷切半产生 U+FFFD 乱码；每个 chunk 的文本经整段解码，保持干净；
+- 长音频保留 continuation 策略（跨段上下文延续，避免丢句），但关闭幻觉修复
+  （hallucination_mitigation=False）：修复回卷会把 CJK 字节级 token 切半产生 U+FFFD 乱码，
+  是前几轮转写稿乱码的根因；关闭后整段解码文本保持干净；
 - 正文直接取各 chunk 的干净文本；行时间戳与「……」停顿来自逐词时间戳（词文本可能有乱码，
   只用于取时间，不影响正文）；
 - [UH]/[UM] 等填充词标签换算成「啊，/嗯，」后，合并连续重复（含空格分隔的重复）。
@@ -176,7 +177,7 @@ def build_lines(chunks, words):
         for s, text in segs:
             pieces = split_long_line(text)
             for pi, piece in enumerate(pieces):
-                ts = fmt_ts(s) if pi == 0 else '      '
+                ts = '[%s]' % fmt_ts(s) if pi == 0 else '      '
                 lines.append((ts, piece))
     return lines, fffd
 
@@ -191,7 +192,7 @@ def main():
         return
     metrics = load_metrics()
     metrics.setdefault('audio_to_text', [])
-    print('加载 CrisperWhisper 2.0 模型（%s · 语言 %s · CPU · verbatim 逐字 · token_lcs 分段）...' % (MODEL_SIZE, LANGUAGE))
+    print('加载 CrisperWhisper 2.0 模型（%s · 语言 %s · CPU · verbatim 逐字 · continuation 分段）...' % (MODEL_SIZE, LANGUAGE))
     model = CrisperWhisperModel(
         MODEL_SIZE,
         backend='transformers',
@@ -215,9 +216,9 @@ def main():
             language=LANGUAGE,
             mode='verbatim',
             word_timestamps=True,
-            longform_strategy='token_lcs',
-            chunk_duration=30.0,
-            stride=30.0,
+            hallucination_mitigation=False,
+            
+            
         )
         words = getattr(result, 'words', None) or []
         chunks = getattr(result, 'chunks', None) or []
@@ -225,9 +226,9 @@ def main():
         lines, fffd = build_lines(chunks, words)
         if not lines:
             if raw_text:
-                lines = [('00:00', clean_tags(raw_text))]
+                lines = [('[00:00]', clean_tags(raw_text))]
             else:
-                lines = [('00:00', '（未识别出语音内容，请重录或换更清晰的录音）')]
+                lines = [('[00:00]', '（未识别出语音内容，请重录或换更清晰的录音）')]
         audio_sec = round(float(getattr(result, 'duration', 0.0)), 1)
         proc_sec = round(float(getattr(result, 'processing_time', 0.0)), 1)
         wall_sec = round(time.time() - t0, 1)
@@ -236,7 +237,7 @@ def main():
             '# 第%d周 问题%d · 测试长者001 · 转写稿' % (week, q),
             '',
             '> 来源录音：`tests/fixtures/%s`' % f.name,
-            '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，token_lcs 分段，CPU）' % (MODEL_SIZE, LANGUAGE),
+            '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，continuation 分段（关闭幻觉修复），CPU）' % (MODEL_SIZE, LANGUAGE),
             '> 转写规则：逐字保留口头禅、语气词、重复、说一半的话；不修正语法、不润色、不删除跑题内容。',
             '> 停顿用「……」标注；情绪用 [笑] [叹气] 等方括号标注；方言词原样保留。',
             '',
