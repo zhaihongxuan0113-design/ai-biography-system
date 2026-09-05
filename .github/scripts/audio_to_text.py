@@ -159,7 +159,7 @@ def build_lines(chunks, words):
             idx = int(round(i * (n_w - 1) / max(n_g - 1, 1))) if n_g > 1 else 0
             idx = max(0, min(n_w - 1, idx))
             group_times.append(wtimes[idx])
-        # 组句：先按停顿切，再按长度切
+        # 组句：先按停顿切，再按长度切；段首时间取段内最早词组时间（重叠区逐词对齐偶发非单调）
         segs = []          # [(start_time, text)]
         cur = []
         cur_start = None
@@ -171,7 +171,7 @@ def build_lines(chunks, words):
                     cur_start = None
                 else:
                     segs.append((s, '……'))
-            if cur_start is None:
+            if cur_start is None or s < cur_start:
                 cur_start = s
             cur.append(g)
             last_word_end = e
@@ -180,9 +180,19 @@ def build_lines(chunks, words):
         for s, text in segs:
             pieces = split_long_line(text)
             for pi, piece in enumerate(pieces):
-                ts = '[%s]' % fmt_ts(s) if pi == 0 else '      '
-                lines.append((ts, piece))
-    return lines, fffd
+                lines.append((s if pi == 0 else None, piece))
+    # 行级时间戳单调钳制（避免重叠区段出现时间回跳）
+    prev_line_ts = -1.0
+    out = []
+    for s, text in lines:
+        if s is None:
+            out.append(('      ', text))
+            continue
+        if s < prev_line_ts:
+            s = prev_line_ts
+        prev_line_ts = s
+        out.append(('[%s]' % fmt_ts(s), text))
+    return out, fffd
 
 
 def main():
