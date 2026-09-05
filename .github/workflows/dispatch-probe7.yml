@@ -1,0 +1,14 @@
+name: probe7
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          cat > /tmp/t.txt <<'EOF'
+          hello world
+          EOF
+          cat /tmp/t.txt
