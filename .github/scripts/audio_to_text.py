@@ -11,6 +11,26 @@ from pathlib import Path
 
 from crisperwhisper import CrisperWhisperModel
 
+# CrisperWhisper 2.0 上游问题规避：长音频的延续上下文（上一段最后 12 个词）可能
+# 因幻觉循环变得极长，导致 HF Whisper 报「decoder_input_ids + max_new_tokens > 448」。
+# 这里把续写上下文截断到最多 60 个字符（仍保留语气与话题连续性），从根上避免超限。
+MAX_CONTEXT_CHARS = 60
+try:
+    from crisperwhisper.prompt import PromptBuilder
+    _orig_build = PromptBuilder._build
+
+    def _build_capped(self, mode, hotwords=None, context=None):
+        if context:
+            context = ' '.join(str(context).split())
+            if len(context) > MAX_CONTEXT_CHARS:
+                cut = context[:MAX_CONTEXT_CHARS].rsplit(' ', 1)[0].strip()
+                context = cut or context[:MAX_CONTEXT_CHARS]
+        return _orig_build(self, mode, hotwords=hotwords, context=context)
+
+    PromptBuilder._build = _build_capped
+except Exception:
+    pass
+
 FIX = Path('tests/fixtures')
 OUT = Path('tests/transcripts')
 OUT.mkdir(parents=True, exist_ok=True)
