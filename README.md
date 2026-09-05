@@ -17,7 +17,11 @@
 - ✅ 长者档案模板已生成：`docs/长者档案模板.md`（Markdown 版）+ `长者档案模板.docx`（本地打印版）
 - ✅ 访谈提纲已生成：`docs/访谈提纲.md`（100 问，童年/青年/中年/老年/感悟各 20 问）+ `访谈提纲.xlsx`（本地 50 周发送计划与问题管理表）
 - ✅ 语气保留指南已生成：`docs/语气保留指南.md`（逐字转写、AI 整理规则、原声二维码方案）
-- ⏳ 下一步：编写 `tests/` 内测用例，邀请第一位长者试访（每周 2 问，50 周完成首轮访谈）
+- ✅ 内测用例已就绪：`tests/全流程内测用例.md`（7 个场景）+ `tests/内测检查清单.xlsx` + 测试长者001示例档案 + 2 段模拟录音（tests/fixtures/）
+- ✅ 每周 2 问自动发送已配置：`.github/workflows/weekly-question.yml`（每周一、周四北京时间 09:00 各建 1 个访谈 Issue，指派仓库所有者触发邮件通知）
+- ✅ 录音提交说明页已上线（GitHub Pages）：https://zhaihongxuan0113-design.github.io/ai-biography-system/
+- ✅ 第一位长者试访已启动：第 1 周问题（第 1、2 问）见 `tests/第1周试访问题.md`，首次发送已手动触发验证
+- ⏳ 下一步：按《全流程内测用例》跑通 7 个场景（录音转写 → AI 整理 → 带二维码 PDF），完成首轮内测复盘
 
 ## 目录结构
 
@@ -29,8 +33,18 @@ ai-biography-system/
 │   ├── 长者档案模板.md     # 长者档案填写模板（Markdown 版）
 │   ├── 访谈提纲.md         # 100 问访谈提纲 + 50 周发送计划
 │   └── 语气保留指南.md     # 从录音到成书的语气保留方案
-├── skills/                # 项目专用 Skills 与提示词模板
-└── tests/                 # 内测用例、验收清单
+├── tests/                 # 内测用例、测试数据、检查清单
+│   ├── 全流程内测用例.md
+│   ├── 内测检查清单.xlsx
+│   ├── 测试长者001档案.md
+│   ├── 第1周试访问题.md
+│   ├── 测试录音样例.md
+│   ├── questions.json     # 100 问结构化数据（定时任务读取）
+│   └── fixtures/          # 2 段模拟录音（各 3-5 分钟）
+├── pages/                 # GitHub Pages：录音提交说明页
+├── .github/workflows/     # 每周访谈问题自动发送
+│   └── weekly-question.yml
+└── skills/                # 项目专用 Skills 与提示词模板
 ```
 
 > 本地「银发AI传记项目」文件夹另存有打印/管理用版本：`长者档案模板.docx`、`访谈提纲.xlsx`（随仓库同步上传，进度记录文档不随仓库上传）。
@@ -51,6 +65,8 @@ ai-biography-system/
 ## 相关链接
 
 - GitHub 仓库：https://github.com/zhaihongxuan0113-design/ai-biography-system
+- 录音提交说明页（GitHub Pages）：https://zhaihongxuan0113-design.github.io/ai-biography-system/
+- 每周访谈问题（Issue 列表）：https://github.com/zhaihongxuan0113-design/ai-biography-system/issues
 - 本地进度记录：`银发AI传记项目/项目进度记录.docx`（本地文件，不随仓库上传）
 - API 用量：DeepSeek 监控技能（deepseek-monitor）
 
@@ -58,4 +74,6 @@ ai-biography-system/
 
 1. 拉取本仓库到本地，与「银发AI传记项目」文件夹保持一致。
 2. 在 `docs/` 阅读项目大纲、档案模板与访谈提纲，按「语气保留指南」开展访谈。
-3. 在 `tests/` 按内测用例执行，并把问题记录回 `docs/` 或本地进度文档。
+3. 在 `tests/` 按《全流程内测用例》执行内测，用《内测检查清单.xlsx》逐条核对。
+4. Watch 本仓库并保持邮箱通知开启：每周一、周四新问题会以 Issue + 邮件形式送达。
+
