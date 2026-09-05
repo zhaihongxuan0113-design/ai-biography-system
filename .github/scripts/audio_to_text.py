@@ -236,7 +236,7 @@ def main():
             '# 第%d周 问题%d · 测试长者001 · 转写稿' % (week, q),
             '',
             '> 来源录音：`tests/fixtures/%s`' % f.name,
-            '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，token_lcs 分段，CPU）' % MODEL_SIZE,
+            '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，token_lcs 分段，CPU）' % (MODEL_SIZE, LANGUAGE),
             '> 转写规则：逐字保留口头禅、语气词、重复、说一半的话；不修正语法、不润色、不删除跑题内容。',
             '> 停顿用「……」标注；情绪用 [笑] [叹气] 等方括号标注；方言词原样保留。',
             '',
