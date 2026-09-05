@@ -103,7 +103,8 @@ jobs:
             "" \
             "- 转写稿：tests/transcripts/" \
             "- 故事稿：tests/stories/" \
-            "- 传记 PDF：tests/books/测试长者001_第1辑.pdf（每页底部二维码可扫码听原声）" \
+            "- 传记 PDF：tests/books/测试长者001_第1辑.pdf（模拟测试）与 tests/books/真人测试_第1辑.pdf（真人测试，若已上传真人录音）" \
+            "- 每页底部二维码可扫码收听对应原声录音" \
             "" \
             "> 本评论由 auto-process.yml 自动生成。" \
             > body.md
