@@ -10,7 +10,6 @@ import urllib.parse
 from pathlib import Path
 
 PAGES_BASE = os.environ.get('PAGES_BASE', 'https://zhaihongxuan0113-design.github.io/ai-biography-system')
-ELDER = '测试长者001'
 VOLUME = 1
 OUT = Path('tests/books')
 OUT.mkdir(parents=True, exist_ok=True)
@@ -18,6 +17,13 @@ QRDIR = OUT / 'qr_codes'
 QRDIR.mkdir(parents=True, exist_ok=True)
 METRICS = Path('tests/metrics.json')
 FIX = Path('tests/fixtures')
+
+# 两个故事分组：真人测试组（文件名带「真人测试_」前缀）与模拟测试组（测试长者001）。
+# 两组各自成书，PDF 文件名互不覆盖。
+GROUPS = [
+    ('真人测试_', '真人测试'),
+    ('', '测试长者001'),
+]
 
 
 def load_metrics():
@@ -33,15 +39,15 @@ def save_metrics(m):
     METRICS.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
-def find_audio(week, q):
+def find_audio(prefix, week, q):
     for ext in ('*.wav', '*.mp3', '*.m4a'):
         for f in sorted(FIX.glob(ext)):
-            if f.stem.startswith('第%d周_问题%d_' % (week, q)):
+            if f.stem.startswith('%s第%d周_问题%d_' % (prefix, week, q)):
                 return f
     n = (week - 1) * 2 + q
     for ext in ('*.wav', '*.mp3', '*.m4a'):
         for f in sorted(FIX.glob(ext)):
-            if re.match(r'录音0*%d_' % n, f.stem):
+            if re.match(r'^%s录音0*%d_' % (re.escape(prefix), n), f.stem):
                 return f
     return None
 
@@ -93,23 +99,24 @@ def make_qr(url, png_path):
     subprocess.run(['qrencode', '-o', str(png_path), '-s', '6', '-m', '1', url], check=True)
 
 
-def main():
-    stories = sorted(Path('tests/stories').glob('第*周_问题*_%s_故事.md' % ELDER))
+def build_book(prefix, label):
+    """按分组前缀把故事打包成一辑 PDF。返回 (pdf 名, 故事页数, 二维码数, 耗时) 或 None。"""
+    stories = sorted(Path('tests/stories').glob('%s第*周_问题*_故事.md' % prefix))
     if not stories:
-        print('没有故事文件，无法成书。')
-        return
+        print('没有故事文件，跳过成书:', label)
+        return None
     pages_html = []
     qr_count = 0
     for st in stories:
-        m = re.match(r'第(\d+)周_问题(\d+)_%s_故事\.md' % ELDER, st.name)
+        m = re.match(r'^%s第(\d+)周_问题(\d+)(?:_%s)?_故事\.md$' % (re.escape(prefix), label), st.name)
         if not m:
             continue
         week, q = int(m.group(1)), int(m.group(2))
-        audio = find_audio(week, q)
+        audio = find_audio(prefix, week, q)
         qr_html = ''
         if audio is not None:
             url = audio_url(audio)
-            png = QRDIR / ('qr_第%d周_问题%d_%s.png' % (week, q, ELDER))
+            png = QRDIR / ('qr_%s第%d周_问题%d_%s.png' % (prefix, week, q, label))
             make_qr(url, png)
             qr_count += 1
             qr_html = (
@@ -124,10 +131,10 @@ def main():
     cover = (
         '<div class="cover">'
         '<h1 class="book-title">我的人生回忆录</h1>'
-        '<p class="book-sub">测试长者001 · 第 1 辑</p>'
+        '<p class="book-sub">%s · 第 %d 辑</p>'
         '<p class="book-date">2026 年 · 内部测试版</p>'
         '</div>'
-    )
+    ) % (label, VOLUME)
     html_doc = (
         '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/>'
         '<style>'
@@ -146,22 +153,32 @@ def main():
         '.qr-label { font-size: 10.5pt; color: #666; }'
         '</style></head><body>' + cover + '\n'.join(pages_html) + '</body></html>'
     )
-    html_path = OUT / ('%s_第%d辑.html' % (ELDER, VOLUME))
-    pdf_path = OUT / ('%s_第%d辑.pdf' % (ELDER, VOLUME))
+    html_path = OUT / ('%s_第%d辑.html' % (label, VOLUME))
+    pdf_path = OUT / ('%s_第%d辑.pdf' % (label, VOLUME))
     html_path.write_text(html_doc, encoding='utf-8')
     t0 = time.time()
     subprocess.run(['weasyprint', str(html_path), str(pdf_path)], check=True, capture_output=True)
     duration = round(time.time() - t0, 1)
-    metrics = load_metrics()
-    metrics.setdefault('story_to_book', []).append({
-        'pdf': pdf_path.name,
-        'stories': len(pages_html),
-        'qr_codes': qr_count,
-        'duration_sec': duration,
-        'pdf_bytes': pdf_path.stat().st_size,
-    })
-    save_metrics(metrics)
     print('完成:', pdf_path.name, duration, '秒 | 故事页数:', len(pages_html), '| 二维码:', qr_count)
+    return pdf_path.name, len(pages_html), qr_count, duration
+
+
+def main():
+    metrics = load_metrics()
+    metrics.setdefault('story_to_book', [])
+    for prefix, label in GROUPS:
+        result = build_book(prefix, label)
+        if result is None:
+            continue
+        pdf_name, pages, qr_count, duration = result
+        metrics['story_to_book'].append({
+            'pdf': pdf_name,
+            'stories': pages,
+            'qr_codes': qr_count,
+            'duration_sec': duration,
+            'pdf_bytes': (OUT / pdf_name).stat().st_size,
+        })
+        save_metrics(metrics)
 
 
 if __name__ == '__main__':
