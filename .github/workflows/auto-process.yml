@@ -44,10 +44,14 @@ jobs:
           .venv/bin/pip install --quiet --upgrade pip
           .venv/bin/pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
           .venv/bin/pip install --quiet "crisperwhisper[transformers]"
+          # 注意：crisperwhisper 2.0 的 hallucination 模块无条件 import ctranslate2，
+          # 而 [transformers] 扩展不含该依赖（上游打包遗漏），需补装避免运行时报错。
+          .venv/bin/pip install --quiet ctranslate2
 
       - name: 步骤1 audio-to-text（转写 · 自动重试2次）
         run: |
           mkdir -p logs
+          set -o pipefail
           for i in 1 2 3; do
             echo "=== audio-to-text 第 $i 次尝试 ==="
             .venv/bin/python .github/scripts/audio_to_text.py 2>&1 | tee -a logs/audio_to_text.log && break
@@ -59,6 +63,7 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
+          set -o pipefail
           for i in 1 2 3; do
             echo "=== text-to-story 第 $i 次尝试 ==="
             .venv/bin/python .github/scripts/text_to_story.py 2>&1 | tee -a logs/text_to_story.log && break
@@ -68,6 +73,7 @@ jobs:
 
       - name: 步骤3 story-to-book（PDF+二维码 · 自动重试2次）
         run: |
+          set -o pipefail
           for i in 1 2 3; do
             echo "=== story-to-book 第 $i 次尝试 ==="
             .venv/bin/python .github/scripts/story_to_book.py 2>&1 | tee -a logs/story_to_book.log && break
@@ -79,7 +85,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add tests/transcripts tests/stories tests/books tests/metrics.json || true
+          git add tests/transcripts 2>/dev/null || true
+          git add tests/stories 2>/dev/null || true
+          git add tests/books 2>/dev/null || true
+          git add tests/metrics.json 2>/dev/null || true
           if git diff --cached --quiet; then echo "没有新产物，跳过提交"; exit 0; fi
           git commit -m "auto: 全流程处理完成（转写/故事/PDF 同步回仓库）"
           git push origin HEAD:main
