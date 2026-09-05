@@ -28,6 +28,7 @@
 ## 参数（CrisperWhisper 2.0 Python API）
 - PyPI 包名：`crisperwhisper`（无连字符；旧包 `crisper-whisper` 与旧 CLI 已失效）
 - 安装：`pip install "crisperwhisper[transformers]"`（纯 PyTorch CPU 后端；GPU 可用 `[ct2]`）
+- 已知坑（2.0 上游打包遗漏）：`hallucination` 模块无条件 `import ctranslate2`，而 `[transformers]` 扩展不含它，需补装：`pip install ctranslate2`
 - 模型：`small` → HuggingFace `nyralabs/CrisperWhisper2.0_small`（首次运行自动下载，约 500MB，已配 HuggingFace 缓存）
 - 调用方式（脚本内已实现）：
   ```python
