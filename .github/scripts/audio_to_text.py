@@ -54,6 +54,32 @@ TAG_MAP = {
     '[gasp]': '[喘气]',
 }
 
+# verbatim 模式的英文填充词标签换成中文语气词（保留口语感）
+FILLER_MAP = {
+    '[um]': '嗯，',
+    '[uh]': '啊，',
+    '[erm]': '呃，',
+    '[hm]': '嗯，',
+}
+
+
+def clean_tags(text):
+    """清洗 verbatim 输出：
+    1. 白名单情绪标签换算成中文（[笑] [叹气] 等）；
+    2. [UM]/[UH] 等填充词换算成中文语气词；
+    3. 其余非言语事件标签（[crying] [scream] [sneeze] 等，多为小模型误报）直接剔除；
+    4. 连续重复的同一标签/语气词合并为一次。"""
+    def repl(m):
+        low = m.group(0).lower()
+        if low in TAG_MAP:
+            return ' %s ' % TAG_MAP[low]
+        return FILLER_MAP.get(low, '')
+    text = re.sub(r'\[[A-Za-z]+\]', repl, text)
+    text = re.sub(r'(\[[^\]]{1,4}\])\s*\1+', r'\1', text)
+    text = re.sub(r'(嗯，|啊，|呃，)\1+', r'\1', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()
+
 
 def load_metrics():
     if METRICS.exists():
@@ -97,43 +123,59 @@ def is_cjk(ch):
             or '\uf900' <= ch <= '\ufaff')
 
 
-def append_token(buf, token):
-    """中文连续拼接不加空格；两端都是英文字母/数字时加空格，避免粘连。"""
-    if not buf:
-        return token
-    last = buf[-1]
-    first = token[0]
-    if last.isascii() and last.isalnum() and first.isascii() and first.isalnum():
-        return buf + ' ' + token
-    return buf + token
+def text_with_pauses(text, words):
+    """以 result.text 为正文（整段解码，无乱码），用逐词时间戳标注每行开头并插入停顿「……」。
 
-
-def words_to_lines(words):
-    """把逐字结果按时间戳分段：超过 1.2 秒的停顿单独成行标注「……」；每行约 12 个词。"""
-    lines = []
-    buf = ''
-    line_start = None
-    prev_end = None
-    for w in words:
-        token = norm_token(getattr(w, 'word', ''))
-        if not token:
+    CrisperWhisper 的逐词文本（result.words）按词切分解码会把部分中文字符切成半个字节，
+    产生 U+FFFD 乱码；但其时间戳是可靠的。因此：正文取 result.text，词表只用来取时间与停顿。
+    """
+    text = clean_tags(text)
+    if not text:
+        return []
+    tokens = text.split()
+    word_times = []
+    for w in words or []:
+        wt = clean_tags(norm_token(getattr(w, 'word', '')))
+        if not wt:
             continue
-        start = float(w.start)
-        end = float(w.end)
-        if prev_end is not None and start - prev_end > PAUSE_SEC:
-            if buf:
-                lines.append(('[%s]' % fmt_ts(line_start), buf))
-                buf = ''
-            lines.append(('[%s]' % fmt_ts(start), '……'))
-        if not buf:
-            line_start = start
-        buf = append_token(buf, token)
-        if len(buf) >= WORDS_PER_LINE * 3:
-            lines.append(('[%s]' % fmt_ts(line_start), buf))
-            buf = ''
-        prev_end = end
+        word_times.append((wt, float(w.start), float(w.end)))
+    # 游标匹配：给每个 token 找对应词的起止时间；乱码词匹配不上时继承上一个 token 的时间
+    times = []
+    wi = 0
+    prev = (0.0, 0.0)
+    for tok in tokens:
+        found = None
+        while wi < len(word_times):
+            wt, s, e = word_times[wi]
+            if wt == tok:
+                found = (s, e)
+                wi += 1
+                break
+            wi += 1
+        if found is None:
+            found = prev
+        else:
+            prev = found
+        times.append(found)
+    lines = []
+    buf = []
+    line_start = None
+    last_end = None
+    for tok, (s, e) in zip(tokens, times):
+        if line_start is None:
+            line_start = s
+        if last_end is not None and s - last_end > PAUSE_SEC:
+            lines.append(('[%s]' % fmt_ts(line_start), ' '.join(buf) + '……'))
+            buf = []
+            line_start = s
+        buf.append(tok)
+        if sum(len(t) for t in buf) + len(buf) >= WORDS_PER_LINE * 6:
+            lines.append(('[%s]' % fmt_ts(line_start), ' '.join(buf)))
+            buf = []
+            line_start = None
+        last_end = e
     if buf:
-        lines.append(('[%s]' % fmt_ts(line_start), buf))
+        lines.append(('[%s]' % fmt_ts(line_start if line_start is not None else 0.0), ' '.join(buf)))
     return lines
 
 
@@ -173,10 +215,12 @@ def main():
             word_timestamps=True,
         )
         words = getattr(result, 'words', None) or []
-        lines = words_to_lines(words)
+        raw_text = (getattr(result, 'text', '') or '').strip()
+        lines = text_with_pauses(raw_text, words)
+        if not lines and raw_text:
+            lines = [('[00:00]', clean_tags(raw_text))]
         if not lines:
-            text = (getattr(result, 'text', '') or '').strip()
-            lines = [('[00:00]', text)] if text else []
+            lines = [('[00:00]', '（未识别出语音内容，请重录或换更清晰的录音）')]
         audio_sec = round(float(getattr(result, 'duration', 0.0)), 1)
         proc_sec = round(float(getattr(result, 'processing_time', 0.0)), 1)
         wall_sec = round(time.time() - t0, 1)
@@ -190,7 +234,7 @@ def main():
             '> 停顿用「……」标注；情绪用 [笑] [叹气] 等方括号标注；方言词原样保留。',
             '',
         ]
-        body = '\n\n'.join('[%s] %s' % (ts, text) for ts, text in lines)
+        body = '\n\n'.join('%s %s' % (ts, text) for ts, text in lines)
         footer = [
             '',
             '---',
