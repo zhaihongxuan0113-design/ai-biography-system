@@ -23,6 +23,17 @@ OUT.mkdir(parents=True, exist_ok=True)
 METRICS = Path('tests/metrics.json')
 QUESTIONS = json.loads(Path('tests/questions.json').read_text(encoding='utf-8'))
 
+# 真人录音测试补充规则：在《语气保留指南》第二步基础上，针对真人口语场景的补充约定。
+# 与指南原文冲突时以本补充为准（例如：指南说删除跑题内容，真人场景要求保留真实聊天感）。
+REAL_RULES = (
+    '【真人场景补充规则（真人口语访谈时生效；与上文冲突时以本补充为准）】\n'
+    '1. 允许内容跑题：保留真实的聊天感，跑题内容不删除，可顺其自然归入相近的段落；\n'
+    '2. 保留老人常用的口头禅、俗语、地方话，不解释、不替换、不翻译，必要时在旁边用小括号注明意思；\n'
+    '3. 只梳理逻辑顺序、拆分段落，绝不改写措辞、不替换口语词、不补充虚构细节；\n'
+    '4. 每段加一个小标题，概括该段回忆主题；\n'
+    '5. 结尾提炼一句老人的原话作为金句，一字不改。'
+)
+
 
 def load_metrics():
     if METRICS.exists():
@@ -62,11 +73,15 @@ def main():
     metrics.setdefault('text_to_story', [])
     done_any = False
     for t in sorted(Path('tests/transcripts').glob('*_转写.md')):
-        m2 = re.match(r'第(\d+)周_问题(\d+)_测试长者001_转写\.md', t.name)
+        m2 = re.match(r'^(真人测试_)?第(\d+)周_问题(\d+)(?:_测试长者001)?_转写\.md$', t.name)
         if not m2:
             continue
-        week, q = int(m2.group(1)), int(m2.group(2))
-        target = OUT / ('第%d周_问题%d_测试长者001_故事.md' % (week, q))
+        is_real = bool(m2.group(1))
+        week, q = int(m2.group(2)), int(m2.group(3))
+        if is_real:
+            target = OUT / ('真人测试_第%d周_问题%d_故事.md' % (week, q))
+        else:
+            target = OUT / ('第%d周_问题%d_测试长者001_故事.md' % (week, q))
         if target.exists():
             print('已存在，跳过:', target.name)
             continue
@@ -74,7 +89,7 @@ def main():
         text = t.read_text(encoding='utf-8')
         system = (
             '你是银发传记的文字整理助手。必须严格按下面《语气保留指南》第二步的整理规则执行，不得自行修改规则。\n\n'
-            '【整理规则（原样执行）】\n' + RULES + '\n\n'
+            '【整理规则（原样执行）】\n' + RULES + '\n\n' + REAL_RULES + '\n\n'
             '【输出格式要求】\n'
             '1. 第一行用 Markdown 一级标题，格式：第%d周 问题%d · %s\n'
             '2. 正文按回忆主题分段，每段一个二级标题（## 小标题）概括该段主题；\n'
