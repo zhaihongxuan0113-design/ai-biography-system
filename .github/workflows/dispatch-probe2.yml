@@ -1,0 +1,17 @@
+name: probe2
+
+on:
+  schedule:
+    - cron: '0 1 * * 1,4'
+  workflow_dispatch:
+    inputs:
+      question_number:
+        description: '手动指定问题序号（1-100）'
+        required: false
+        default: ''
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo probe2-ok
