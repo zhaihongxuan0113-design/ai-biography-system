@@ -5,9 +5,9 @@
 依赖：pip install "crisperwhisper[transformers]"（PyPI 包名为 crisperwhisper，无连字符）。
 
 v3 说明：
-- 长音频保留 continuation 策略（跨段上下文延续，避免丢句），但关闭幻觉修复
-  （hallucination_mitigation=False）：修复回卷会把 CJK 字节级 token 切半产生 U+FFFD 乱码，
-  是前几轮转写稿乱码的根因；关闭后整段解码文本保持干净；
+- 长音频保留 continuation 策略（跨段上下文延续，避免丢句）+ 默认幻觉修复（防重复循环）；
+- Whisper small 对生僻字会按 UTF-8 字节级 token 解码，偶发字节序列不完整产生 U+FFFD，
+  清洗时统一替换为「□」并在文末标注数量（诚实保留原位置，供人工复核）；
 - 正文直接取各 chunk 的干净文本；行时间戳与「……」停顿来自逐词时间戳（词文本可能有乱码，
   只用于取时间，不影响正文）；
 - [UH]/[UM] 等填充词标签换算成「啊，/嗯，」后，合并连续重复（含空格分隔的重复）。
@@ -64,6 +64,7 @@ def clean_tags(text):
         return FILLER_MAP.get(low, '')
 
     text = re.sub(r'\[[A-Za-z]+\]', repl, text)
+    text = text.replace('\ufffd', '□')
     text = re.sub(r'(\[[^\]]{1,4}\])(?:\s*\1)+', r'\1', text)
     text = re.sub(r'((?:嗯|啊|呃)，)(?:\s*\1)+', r'\1', text)
     text = re.sub(r'\s{2,}', ' ', text)
@@ -124,12 +125,14 @@ def build_lines(chunks, words):
     相邻词组间隔 > PAUSE_SEC 时行尾补「……」。返回 [(ts, text)] 与 FFFD 计数。"""
     chunk_list = []
     for c in chunks or []:
-        text = clean_tags(getattr(c, 'text', '') or '')
+        raw = getattr(c, 'text', '') or ''
+        fffd_chunk = raw.count('\ufffd')
+        text = clean_tags(raw)
         if not text:
             continue
         s = float(getattr(c, 'start_sec', 0.0) or 0.0)
         e = float(getattr(c, 'end_sec', 0.0) or 0.0)
-        chunk_list.append({'start': s, 'end': e, 'text': text})
+        chunk_list.append({'start': s, 'end': e, 'text': text, 'fffd': fffd_chunk})
     chunk_list.sort(key=lambda c: c['start'])
     if not chunk_list:
         return [], 0
@@ -139,7 +142,7 @@ def build_lines(chunks, words):
     last_word_end = None
     for ci, c in enumerate(chunk_list):
         groups = c['text'].split()
-        fffd += c['text'].count('\ufffd')
+        fffd += c['fffd']
         wtimes = []
         for w in words or []:
             t = float(getattr(w, 'start', -1.0) or -1.0)
@@ -216,7 +219,7 @@ def main():
             language=LANGUAGE,
             mode='verbatim',
             word_timestamps=True,
-            hallucination_mitigation=False,
+
             
             
         )
@@ -237,7 +240,7 @@ def main():
             '# 第%d周 问题%d · 测试长者001 · 转写稿' % (week, q),
             '',
             '> 来源录音：`tests/fixtures/%s`' % f.name,
-            '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，continuation 分段（关闭幻觉修复），CPU）' % (MODEL_SIZE, LANGUAGE),
+            '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，continuation 分段，CPU）' % (MODEL_SIZE, LANGUAGE),
             '> 转写规则：逐字保留口头禅、语气词、重复、说一半的话；不修正语法、不润色、不删除跑题内容。',
             '> 停顿用「……」标注；情绪用 [笑] [叹气] 等方括号标注；方言词原样保留。',
             '',
@@ -252,7 +255,7 @@ def main():
             '',
         ]
         if fffd:
-            footer.insert(-1, '> ⚠️ 本稿含 %d 个替换字符（U+FFFD），建议人工复核对应位置。' % fffd)
+            footer.insert(-1, '> ⚠️ 本稿含 %d 处无法解码的字符，已用「□」标出，建议人工复核对应位置。' % fffd)
             footer.insert(-1, '')
         target.write_text(
             '\n'.join(header) + body + '\n'.join(footer),
