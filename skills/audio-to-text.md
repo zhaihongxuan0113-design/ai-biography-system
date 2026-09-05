@@ -1,7 +1,7 @@
 # 技能：audio-to-text（语音转写 · 保留口语特征）
 
 > 对应工作流步骤：auto-process.yml 步骤 1 ｜ 实现脚本：.github/scripts/audio_to_text.py
-> 调研来源：CrisperWhisper（https://github.com/nyrahealth/CrisperWhisper ，逐字转写、自带填充词保留），配合 ffmpeg 解码。
+> 调研来源：CrisperWhisper 2.0（https://github.com/nyrahealth/CrisperWhisper ，逐字转写、自带填充词/重复/停顿/笑声保留），配合 ffmpeg 解码。
 
 ## 功能
 把长者访谈录音逐字转成带时间戳的 Markdown 转写稿，全程保留口语特征，供下一步 AI 整理使用。
@@ -25,9 +25,23 @@
 5. 方言词、口音特色词原样保留，可加小括号注释；
 6. 文末附转写信息：模型、语言、音频时长、转写耗时。
 
-## 参数
-- 模型：`small`（中文效果与速度均衡；首次运行自动下载模型，约 500MB，已配 HuggingFace 缓存）
-- 语言：`zh` ｜ 设备：`cpu` ｜ 输出：srt 时间戳 → 转 Markdown
+## 参数（CrisperWhisper 2.0 Python API）
+- PyPI 包名：`crisperwhisper`（无连字符；旧包 `crisper-whisper` 与旧 CLI 已失效）
+- 安装：`pip install "crisperwhisper[transformers]"`（纯 PyTorch CPU 后端；GPU 可用 `[ct2]`）
+- 模型：`small` → HuggingFace `nyralabs/CrisperWhisper2.0_small`（首次运行自动下载，约 500MB，已配 HuggingFace 缓存）
+- 调用方式（脚本内已实现）：
+  ```python
+  from crisperwhisper import CrisperWhisperModel
+  model = CrisperWhisperModel("small", backend="transformers", device="cpu", compute_type="float32")
+  result = model.transcribe("录音.wav", language="zh", mode="verbatim", word_timestamps=True)
+  # result.text：完整转写文本；result.words：逐词 WordTimestamp(word, start, end)；
+  # result.duration：音频时长；result.processing_time：模型处理耗时
+  ```
+- 输出：由脚本按 `result.words` 生成带 `[MM:SS]` 时间戳的 Markdown（不再是 srt 文件）
+- 英文情绪标签自动换算：`[laughter]`→`[笑]`、`[sigh]`→`[叹气]`、`[cough]`→`[咳嗽]` 等
+
+## 许可提示（内部测试备忘）
+- 推理代码 MIT；标准模型权重为非商业研究许可，Pro 模型需商业许可。正式商用前需联系 Nyra 获取授权。
 
 ## 幂等与重试
 - 已存在同名转写稿的录音自动跳过（不重复转写）；
