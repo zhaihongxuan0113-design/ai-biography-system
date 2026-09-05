@@ -1,0 +1,117 @@
+# 录音自动处理流水线：转写 → AI整理 → 带原声二维码 PDF → 结果同步回仓库 → Issue 评论通知
+# 触发：向 tests/fixtures/ 上传新录音（push）或手动 Run workflow。
+# 每步失败自动重试 2 次（共 3 次），最终失败时向最近访谈 Issue 评论错误原因。
+
+name: 录音自动处理流水线
+
+on:
+  push:
+    paths:
+      - 'tests/fixtures/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: auto-process
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      PAGES_BASE: https://zhaihongxuan0113-design.github.io/ai-biography-system
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 缓存语音模型（首次运行后生效）
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-crisper-small-v1
+
+      - name: 环境准备（ffmpeg、qrencode、中文字体、WeasyPrint、CrisperWhisper）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg qrencode fonts-noto-cjk weasyprint
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet crisper-whisper
+
+      - name: 步骤1 audio-to-text（转写 · 自动重试2次）
+        run: |
+          mkdir -p logs
+          for i in 1 2 3; do
+            echo "=== audio-to-text 第 $i 次尝试 ==="
+            .venv/bin/python .github/scripts/audio_to_text.py 2>&1 | tee -a logs/audio_to_text.log && break
+            if [ "$i" = "3" ]; then echo "audio-to-text 最终失败"; exit 1; fi
+            sleep 15
+          done
+
+      - name: 步骤2 text-to-story（DeepSeek 整理 · 自动重试2次）
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          for i in 1 2 3; do
+            echo "=== text-to-story 第 $i 次尝试 ==="
+            .venv/bin/python .github/scripts/text_to_story.py 2>&1 | tee -a logs/text_to_story.log && break
+            if [ "$i" = "3" ]; then echo "text-to-story 最终失败"; exit 1; fi
+            sleep 15
+          done
+
+      - name: 步骤3 story-to-book（PDF+二维码 · 自动重试2次）
+        run: |
+          for i in 1 2 3; do
+            echo "=== story-to-book 第 $i 次尝试 ==="
+            .venv/bin/python .github/scripts/story_to_book.py 2>&1 | tee -a logs/story_to_book.log && break
+            if [ "$i" = "3" ]; then echo "story-to-book 最终失败"; exit 1; fi
+            sleep 15
+          done
+
+      - name: 步骤4 结果同步回仓库
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/transcripts tests/stories tests/books tests/metrics.json || true
+          if git diff --cached --quiet; then echo "没有新产物，跳过提交"; exit 0; fi
+          git commit -m "auto: 全流程处理完成（转写/故事/PDF 同步回仓库）"
+          git push origin HEAD:main
+
+      - name: 步骤5 完成通知（评论最近访谈 Issue）
+        if: success()
+        run: |
+          N=$(gh issue list --repo "$REPO" --label interview-question --state all --limit 1 --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -z "$N" ] || [ "$N" = "null" ]; then echo "没有访谈 Issue，跳过评论"; exit 0; fi
+          printf '%s\n' \
+            "🎉 录音自动处理完成（运行：$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID）" \
+            "" \
+            "- 转写稿：tests/transcripts/" \
+            "- 故事稿：tests/stories/" \
+            "- 传记 PDF：tests/books/测试长者001_第1辑.pdf（每页底部二维码可扫码听原声）" \
+            "" \
+            "> 本评论由 auto-process.yml 自动生成。" \
+            > body.md
+          gh issue comment "$N" --repo "$REPO" --body-file body.md
+
+      - name: 失败通知（评论错误原因）
+        if: failure()
+        run: |
+          N=$(gh issue list --repo "$REPO" --label interview-question --state all --limit 1 --json number -q '.[0].number' 2>/dev/null || true)
+          TAIL=$(tail -n 12 logs/audio_to_text.log logs/text_to_story.log logs/story_to_book.log 2>/dev/null | head -c 3000 || true)
+          if [ -z "$N" ] || [ "$N" = "null" ]; then echo "没有访谈 Issue，无法评论"; exit 0; fi
+          printf '%s\n' \
+            "⚠️ 录音自动处理失败。运行链接：$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" \
+            "" \
+            "最近日志（用于定位错误原因）：" \
+            "" \
+            '```' \
+            "$TAIL" \
+            '```' \
+            > body.md
+          gh issue comment "$N" --repo "$REPO" --body-file body.md || true
