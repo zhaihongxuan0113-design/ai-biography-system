@@ -3,6 +3,13 @@
 
 规则来源：docs/语气保留指南.md 第一步。本脚本不做任何润色与删改。
 依赖：pip install "crisperwhisper[transformers]"（PyPI 包名为 crisperwhisper，无连字符）。
+
+v3 说明：
+- 长音频改用 token_lcs 策略（chunk 30 秒、stride 30 秒、无重叠），避免 continuation+幻觉修复
+  把 CJK 字节级 token 回卷切半产生 U+FFFD 乱码；每个 chunk 的文本经整段解码，保持干净；
+- 正文直接取各 chunk 的干净文本；行时间戳与「……」停顿来自逐词时间戳（词文本可能有乱码，
+  只用于取时间，不影响正文）；
+- [UH]/[UM] 等填充词标签换算成「啊，/嗯，」后，合并连续重复（含空格分隔的重复）。
 """
 import json
 import re
@@ -10,26 +17,6 @@ import time
 from pathlib import Path
 
 from crisperwhisper import CrisperWhisperModel
-
-# CrisperWhisper 2.0 上游问题规避：长音频的延续上下文（上一段最后 12 个词）可能
-# 因幻觉循环变得极长，导致 HF Whisper 报「decoder_input_ids + max_new_tokens > 448」。
-# 这里把续写上下文截断到最多 60 个字符（仍保留语气与话题连续性），从根上避免超限。
-MAX_CONTEXT_CHARS = 60
-try:
-    from crisperwhisper.prompt import PromptBuilder
-    _orig_build = PromptBuilder._build
-
-    def _build_capped(self, mode, hotwords=None, context=None):
-        if context:
-            context = ' '.join(str(context).split())
-            if len(context) > MAX_CONTEXT_CHARS:
-                cut = context[:MAX_CONTEXT_CHARS].rsplit(' ', 1)[0].strip()
-                context = cut or context[:MAX_CONTEXT_CHARS]
-        return _orig_build(self, mode, hotwords=hotwords, context=context)
-
-    PromptBuilder._build = _build_capped
-except Exception:
-    pass
 
 FIX = Path('tests/fixtures')
 OUT = Path('tests/transcripts')
@@ -39,7 +26,7 @@ METRICS = Path('tests/metrics.json')
 MODEL_SIZE = 'small'
 LANGUAGE = 'zh'
 PAUSE_SEC = 1.2
-WORDS_PER_LINE = 12
+MAX_LINE_CHARS = 60
 
 # verbatim 模式的英文情绪标签统一换算成中文标注（《语气保留指南》约定）
 TAG_MAP = {
@@ -68,15 +55,16 @@ def clean_tags(text):
     1. 白名单情绪标签换算成中文（[笑] [叹气] 等）；
     2. [UM]/[UH] 等填充词换算成中文语气词；
     3. 其余非言语事件标签（[crying] [scream] [sneeze] 等，多为小模型误报）直接剔除；
-    4. 连续重复的同一标签/语气词合并为一次。"""
+    4. 连续重复的同一标签/语气词合并为一次（含空格分隔的重复）。"""
     def repl(m):
         low = m.group(0).lower()
         if low in TAG_MAP:
             return ' %s ' % TAG_MAP[low]
         return FILLER_MAP.get(low, '')
+
     text = re.sub(r'\[[A-Za-z]+\]', repl, text)
-    text = re.sub(r'(\[[^\]]{1,4}\])\s*\1+', r'\1', text)
-    text = re.sub(r'(嗯，|啊，|呃，)\1+', r'\1', text)
+    text = re.sub(r'(\[[^\]]{1,4}\])(?:\s*\1)+', r'\1', text)
+    text = re.sub(r'((?:嗯|啊|呃)，)(?:\s*\1)+', r'\1', text)
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
 
@@ -109,74 +97,88 @@ def fmt_ts(sec):
     return '%02d:%02d' % (int(sec // 60), int(sec % 60))
 
 
-def norm_token(token):
-    token = token.strip()
-    if not token:
-        return ''
-    low = token.lower()
-    return TAG_MAP.get(low, token)
+def split_long_line(line_text):
+    """把过长的行按标点切成多行，尽量在逗号/句号/省略号后断。"""
+    if len(line_text) <= MAX_LINE_CHARS:
+        return [line_text]
+    pieces = []
+    rest = line_text
+    while len(rest) > MAX_LINE_CHARS:
+        cut = -1
+        for marker in ('……', '。', '！', '？', '，', ' '):
+            pos = rest.rfind(marker, MAX_LINE_CHARS // 2, MAX_LINE_CHARS)
+            if pos > cut:
+                cut = pos + len(marker)
+        if cut <= 0:
+            cut = MAX_LINE_CHARS
+        pieces.append(rest[:cut].strip())
+        rest = rest[cut:].strip()
+    if rest:
+        pieces.append(rest)
+    return pieces
 
 
-def is_cjk(ch):
-    return ('\u3400' <= ch <= '\u4dbf'
-            or '\u4e00' <= ch <= '\u9fff'
-            or '\uf900' <= ch <= '\ufaff')
-
-
-def text_with_pauses(text, words):
-    """以 result.text 为正文（整段解码，无乱码），用逐词时间戳标注每行开头并插入停顿「……」。
-
-    CrisperWhisper 的逐词文本（result.words）按词切分解码会把部分中文字符切成半个字节，
-    产生 U+FFFD 乱码；但其时间戳是可靠的。因此：正文取 result.text，词表只用来取时间与停顿。
-    """
-    text = clean_tags(text)
-    if not text:
-        return []
-    tokens = text.split()
-    word_times = []
-    for w in words or []:
-        wt = clean_tags(norm_token(getattr(w, 'word', '')))
-        if not wt:
+def build_lines(chunks, words):
+    """正文取各 chunk 干净文本；每个词组用逐词时间按顺序比例映射；
+    相邻词组间隔 > PAUSE_SEC 时行尾补「……」。返回 [(ts, text)] 与 FFFD 计数。"""
+    chunk_list = []
+    for c in chunks or []:
+        text = clean_tags(getattr(c, 'text', '') or '')
+        if not text:
             continue
-        word_times.append((wt, float(w.start), float(w.end)))
-    # 游标匹配：给每个 token 找对应词的起止时间；乱码词匹配不上时继承上一个 token 的时间
-    times = []
-    wi = 0
-    prev = (0.0, 0.0)
-    for tok in tokens:
-        found = None
-        while wi < len(word_times):
-            wt, s, e = word_times[wi]
-            if wt == tok:
-                found = (s, e)
-                wi += 1
-                break
-            wi += 1
-        if found is None:
-            found = prev
-        else:
-            prev = found
-        times.append(found)
+        s = float(getattr(c, 'start_sec', 0.0) or 0.0)
+        e = float(getattr(c, 'end_sec', 0.0) or 0.0)
+        chunk_list.append({'start': s, 'end': e, 'text': text})
+    chunk_list.sort(key=lambda c: c['start'])
+    if not chunk_list:
+        return [], 0
+
+    fffd = 0
     lines = []
-    buf = []
-    line_start = None
-    last_end = None
-    for tok, (s, e) in zip(tokens, times):
-        if line_start is None:
-            line_start = s
-        if last_end is not None and s - last_end > PAUSE_SEC:
-            lines.append(('[%s]' % fmt_ts(line_start), ' '.join(buf) + '……'))
-            buf = []
-            line_start = s
-        buf.append(tok)
-        if sum(len(t) for t in buf) + len(buf) >= WORDS_PER_LINE * 6:
-            lines.append(('[%s]' % fmt_ts(line_start), ' '.join(buf)))
-            buf = []
-            line_start = None
-        last_end = e
-    if buf:
-        lines.append(('[%s]' % fmt_ts(line_start if line_start is not None else 0.0), ' '.join(buf)))
-    return lines
+    last_word_end = None
+    for ci, c in enumerate(chunk_list):
+        groups = c['text'].split()
+        fffd += c['text'].count('\ufffd')
+        wtimes = []
+        for w in words or []:
+            t = float(getattr(w, 'start', -1.0) or -1.0)
+            e = float(getattr(w, 'end', t) or t)
+            if c['start'] <= t < c['end']:
+                wtimes.append((t, e))
+            elif ci == len(chunk_list) - 1 and t >= c['start']:
+                wtimes.append((t, e))
+        if not wtimes:
+            wtimes = [(c['start'], c['end'])]
+        n_g, n_w = len(groups), len(wtimes)
+        group_times = []
+        for i in range(n_g):
+            idx = int(round(i * (n_w - 1) / max(n_g - 1, 1))) if n_g > 1 else 0
+            idx = max(0, min(n_w - 1, idx))
+            group_times.append(wtimes[idx])
+        # 组句：先按停顿切，再按长度切
+        segs = []          # [(start_time, text)]
+        cur = []
+        cur_start = None
+        for g, (s, e) in zip(groups, group_times):
+            if last_word_end is not None and s - last_word_end > PAUSE_SEC:
+                if cur:
+                    segs.append((cur_start if cur_start is not None else s, ' '.join(cur) + '……'))
+                    cur = []
+                    cur_start = None
+                else:
+                    segs.append((s, '……'))
+            if cur_start is None:
+                cur_start = s
+            cur.append(g)
+            last_word_end = e
+        if cur:
+            segs.append((cur_start if cur_start is not None else c['start'], ' '.join(cur)))
+        for s, text in segs:
+            pieces = split_long_line(text)
+            for pi, piece in enumerate(pieces):
+                ts = fmt_ts(s) if pi == 0 else '      '
+                lines.append((ts, piece))
+    return lines, fffd
 
 
 def main():
@@ -189,7 +191,7 @@ def main():
         return
     metrics = load_metrics()
     metrics.setdefault('audio_to_text', [])
-    print('加载 CrisperWhisper 2.0 模型（%s · 语言 %s · CPU · 逐字模式）...' % (MODEL_SIZE, LANGUAGE))
+    print('加载 CrisperWhisper 2.0 模型（%s · 语言 %s · CPU · verbatim 逐字 · token_lcs 分段）...' % (MODEL_SIZE, LANGUAGE))
     model = CrisperWhisperModel(
         MODEL_SIZE,
         backend='transformers',
@@ -213,23 +215,28 @@ def main():
             language=LANGUAGE,
             mode='verbatim',
             word_timestamps=True,
+            longform_strategy='token_lcs',
+            chunk_duration=30.0,
+            stride=30.0,
         )
         words = getattr(result, 'words', None) or []
+        chunks = getattr(result, 'chunks', None) or []
         raw_text = (getattr(result, 'text', '') or '').strip()
-        lines = text_with_pauses(raw_text, words)
-        if not lines and raw_text:
-            lines = [('[00:00]', clean_tags(raw_text))]
+        lines, fffd = build_lines(chunks, words)
         if not lines:
-            lines = [('[00:00]', '（未识别出语音内容，请重录或换更清晰的录音）')]
+            if raw_text:
+                lines = [('00:00', clean_tags(raw_text))]
+            else:
+                lines = [('00:00', '（未识别出语音内容，请重录或换更清晰的录音）')]
         audio_sec = round(float(getattr(result, 'duration', 0.0)), 1)
         proc_sec = round(float(getattr(result, 'processing_time', 0.0)), 1)
         wall_sec = round(time.time() - t0, 1)
-        word_count = len(words) or len((getattr(result, 'text', '') or '').split())
+        word_count = len(words) or len(raw_text.split())
         header = [
             '# 第%d周 问题%d · 测试长者001 · 转写稿' % (week, q),
             '',
             '> 来源录音：`tests/fixtures/%s`' % f.name,
-            '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，CPU）' % (MODEL_SIZE, LANGUAGE),
+            '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，token_lcs 分段，CPU）' % MODEL_SIZE,
             '> 转写规则：逐字保留口头禅、语气词、重复、说一半的话；不修正语法、不润色、不删除跑题内容。',
             '> 停顿用「……」标注；情绪用 [笑] [叹气] 等方括号标注；方言词原样保留。',
             '',
@@ -239,10 +246,13 @@ def main():
             '',
             '---',
             '',
-            '转写信息：音频时长 %s 秒 ｜ 模型处理耗时 %s 秒 ｜ 脚本总耗时 %s 秒 ｜ 词数 %d。' % (
-                audio_sec, proc_sec, wall_sec, word_count),
+            '转写信息：音频时长 %s 秒 ｜ 模型处理耗时 %s 秒 ｜ 脚本总耗时 %s 秒 ｜ 词数 %d ｜ 分段数 %d。' % (
+                audio_sec, proc_sec, wall_sec, word_count, len(chunks)),
             '',
         ]
+        if fffd:
+            footer.insert(-1, '> ⚠️ 本稿含 %d 个替换字符（U+FFFD），建议人工复核对应位置。' % fffd)
+            footer.insert(-1, '')
         target.write_text(
             '\n'.join(header) + body + '\n'.join(footer),
             encoding='utf-8',
@@ -254,10 +264,12 @@ def main():
             'model_processing_sec': proc_sec,
             'duration_sec': wall_sec,
             'word_count': word_count,
+            'chunks': len(chunks),
+            'fffd_count': fffd,
             'transcript_bytes': target.stat().st_size,
         })
         save_metrics(metrics)
-        print('完成:', target.name, '| 模型耗时', proc_sec, '秒 | 总耗时', wall_sec, '秒 | 词数', word_count)
+        print('完成:', target.name, '| 模型耗时', proc_sec, '秒 | 总耗时', wall_sec, '秒 | 词数', word_count, '| FFFD', fffd)
         done_any = True
     if not done_any:
         print('无新录音需要转写。')
