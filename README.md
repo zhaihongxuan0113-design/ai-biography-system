@@ -41,7 +41,7 @@ ai-biography-system/
 │   ├── 测试录音样例.md
 │   ├── questions.json     # 100 问结构化数据（定时任务读取）
 │   └── fixtures/          # 2 段模拟录音（各 3-5 分钟）
-├── pages/                 # GitHub Pages：录音提交说明页
+├── index.html             # GitHub Pages：录音提交说明页（根目录）
 ├── .github/workflows/     # 每周访谈问题自动发送
 │   └── weekly-question.yml
 └── skills/                # 项目专用 Skills 与提示词模板
@@ -76,4 +76,5 @@ ai-biography-system/
 2. 在 `docs/` 阅读项目大纲、档案模板与访谈提纲，按「语气保留指南」开展访谈。
 3. 在 `tests/` 按《全流程内测用例》执行内测，用《内测检查清单.xlsx》逐条核对。
 4. Watch 本仓库并保持邮箱通知开启：每周一、周四新问题会以 Issue + 邮件形式送达。
+
 
