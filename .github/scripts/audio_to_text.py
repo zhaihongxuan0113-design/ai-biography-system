@@ -20,6 +20,7 @@ v4 说明（真人录音测试前置优化）：
 - verbatim 逐字模式不变：口头禅、语气词、重复、说一半的话全部保留，不修正语法、不删跑题内容。
 """
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -50,6 +51,11 @@ FIX = Path('tests/fixtures')
 OUT = Path('tests/transcripts')
 OUT.mkdir(parents=True, exist_ok=True)
 METRICS = Path('tests/metrics.json')
+DAD_DIR = Path('老爸录音')  # 真人实测：父亲自由讲述录音（仅本地保存，隐私不上传公开仓库）
+# 后端/量化开关：本地可用 CRISPER_BACKEND=ct2 CRISPER_COMPUTE=int8 加速；
+# 默认保持与 GitHub Actions 一致的 transformers + float32。
+BACKEND = os.environ.get('CRISPER_BACKEND', 'transformers')
+COMPUTE = os.environ.get('CRISPER_COMPUTE', 'float32')
 
 MODEL_SIZE = 'small'
 LANGUAGE = 'zh'
@@ -92,7 +98,7 @@ def clean_tags(text):
         return FILLER_MAP.get(low, '')
 
     text = re.sub(r'\[[A-Za-z]+\]', repl, text)
-    text = text.replace('\ufffd', '□')
+    text = text.replace('\ufffd', '□[?]')
     text = re.sub(r'(\[[^\]]{1,4}\])(?:\s*\1)+', r'\1', text)
     text = re.sub(r'((?:嗯|啊|呃)，)(?:\s*\1)+', r'\1', text)
     text = re.sub(r'\s{2,}', ' ', text)
@@ -225,102 +231,120 @@ def build_lines(chunks, words):
     return out, fffd
 
 
+def transcribe_one(model, f, target, title, source_label, metrics):
+    """转写单个录音文件并写入 Markdown 转写稿。"""
+    t0 = time.time()
+    print('转写中:', f.name)
+    result = model.transcribe(
+        str(f),
+        language=LANGUAGE,
+        mode='verbatim',
+        word_timestamps=True,
+    )
+    words = getattr(result, 'words', None) or []
+    chunks = getattr(result, 'chunks', None) or []
+    raw_text = (getattr(result, 'text', '') or '').strip()
+    lines, fffd = build_lines(chunks, words)
+    if not lines:
+        if raw_text:
+            lines = [('[00:00]', clean_tags(raw_text))]
+        else:
+            lines = [('[00:00]', '（未识别出语音内容[?]，请重录或换更清晰的录音）')]
+    audio_sec = round(float(getattr(result, 'duration', 0.0)), 1)
+    proc_sec = round(float(getattr(result, 'processing_time', 0.0)), 1)
+    wall_sec = round(time.time() - t0, 1)
+    word_count = len(words) or len(raw_text.split())
+    char_count = sum(len(re.sub(r'[^\u4e00-\u9fff]', '', t)) for _, t in lines)
+    header = [
+        title,
+        '',
+        '> 来源录音：`%s`' % source_label,
+        '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，continuation 分段，CPU，后端 %s/%s）' % (MODEL_SIZE, LANGUAGE, BACKEND, COMPUTE),
+        '> 转写规则：逐字保留口头禅、语气词、重复、说一半的话；不修正语法、不润色、不删除跑题内容。',
+        '> 停顿用「……」标注；情绪用 [笑] [叹气] 等方括号标注；方言词原样保留；明显识别错误标 [?]。',
+        '',
+    ]
+    body = '\n\n'.join('%s %s' % (ts, text) for ts, text in lines)
+    footer = [
+        '',
+        '---',
+        '',
+        '转写信息：音频时长 %s 秒 ｜ 模型处理耗时 %s 秒 ｜ 脚本总耗时 %s 秒 ｜ 词数 %d ｜ 汉字数 %d ｜ 分段数 %d ｜ 待复核 [?] %d 处。' % (
+            audio_sec, proc_sec, wall_sec, word_count, char_count, len(chunks), fffd),
+        '',
+    ]
+    if fffd:
+        footer.insert(-1, '> ⚠️ 本稿含 %d 处无法可靠识别的字符，正文已标为「□[?]」，建议人工复核对应位置。' % fffd)
+        footer.insert(-1, '')
+    target.write_text(
+        '\n'.join(header) + body + '\n'.join(footer),
+        encoding='utf-8',
+    )
+    metrics['audio_to_text'].append({
+        'audio': f.name,
+        'transcript': target.name,
+        'audio_duration_sec': audio_sec,
+        'model_processing_sec': proc_sec,
+        'duration_sec': wall_sec,
+        'word_count': word_count,
+        'chinese_chars': char_count,
+        'chunks': len(chunks),
+        'fffd_count': fffd,
+        'transcript_bytes': target.stat().st_size,
+    })
+    save_metrics(metrics)
+    print('完成:', target.name, '| 模型耗时', proc_sec, '秒 | 总耗时', wall_sec, '秒 | 词数', word_count, '| 汉字', char_count, '| FFFD', fffd)
+
+
 def main():
-    files = []
+    jobs = []
     for ext in ('*.wav', '*.mp3', '*.m4a'):
-        files.extend(FIX.glob(ext))
-    files = sorted(set(files), key=lambda p: p.name)
-    if not files:
+        for f in FIX.glob(ext):
+            week, q, is_real = parse_week_q(f.stem)
+            if not week:
+                print('跳过（无法解析周次/问题号）:', f.name)
+                continue
+            if is_real:
+                target = OUT / ('真人测试_第%d周_问题%d_转写.md' % (week, q))
+                title = '# 真人测试 · 第%d周 问题%d · 转写稿' % (week, q)
+            else:
+                target = OUT / ('第%d周_问题%d_测试长者001_转写.md' % (week, q))
+                title = '# 第%d周 问题%d · 测试长者001 · 转写稿' % (week, q)
+            jobs.append((f, target, title, 'tests/fixtures/%s' % f.name))
+    jobs = list({j[0]: j for j in jobs}.values())
+    jobs.sort(key=lambda j: j[0].name)
+
+    # 老爸自传模式（真人实测）：处理本地「老爸录音/」目录，按文件名排序即录音顺序 1-6。
+    # 原始录音只保留在本地，不进 git、不上传公开仓库（隐私）。
+    if DAD_DIR.exists():
+        dad_files = sorted(
+            [DAD_DIR / n for n in os.listdir(DAD_DIR)
+             if Path(n).suffix.lower() in ('.wav', '.mp3', '.m4a')],
+            key=lambda p: p.name.lower(),
+        )
+        for i, f in enumerate(dad_files, 1):
+            target = OUT / ('老爸自传_第%d段_转写.md' % i)
+            title = '# 老爸自传 · 第%d段 · 转写稿' % i
+            jobs.append((f, target, title, '老爸录音/%s' % f.name))
+
+    if not jobs:
         print('无新录音需要转写。')
         return
     metrics = load_metrics()
     metrics.setdefault('audio_to_text', [])
-    print('加载 CrisperWhisper 2.0 模型（%s · 语言 %s · CPU · verbatim 逐字 · continuation 分段）...' % (MODEL_SIZE, LANGUAGE))
+    print('加载 CrisperWhisper 2.0 模型（%s · 语言 %s · 后端 %s · %s · verbatim 逐字 · continuation 分段）...' % (MODEL_SIZE, LANGUAGE, BACKEND, COMPUTE))
     model = CrisperWhisperModel(
         MODEL_SIZE,
-        backend='transformers',
+        backend=BACKEND,
         device='cpu',
-        compute_type='float32',
+        compute_type=COMPUTE,
     )
     done_any = False
-    for f in files:
-        week, q, is_real = parse_week_q(f.stem)
-        if not week:
-            print('跳过（无法解析周次/问题号）:', f.name)
-            continue
-        if is_real:
-            target = OUT / ('真人测试_第%d周_问题%d_转写.md' % (week, q))
-        else:
-            target = OUT / ('第%d周_问题%d_测试长者001_转写.md' % (week, q))
+    for f, target, title, src_label in jobs:
         if target.exists():
             print('已存在，跳过:', target.name)
             continue
-        t0 = time.time()
-        print('转写中:', f.name)
-        result = model.transcribe(
-            str(f),
-            language=LANGUAGE,
-            mode='verbatim',
-            word_timestamps=True,
-
-            
-            
-        )
-        words = getattr(result, 'words', None) or []
-        chunks = getattr(result, 'chunks', None) or []
-        raw_text = (getattr(result, 'text', '') or '').strip()
-        lines, fffd = build_lines(chunks, words)
-        if not lines:
-            if raw_text:
-                lines = [('[00:00]', clean_tags(raw_text))]
-            else:
-                lines = [('[00:00]', '（未识别出语音内容，请重录或换更清晰的录音）')]
-        audio_sec = round(float(getattr(result, 'duration', 0.0)), 1)
-        proc_sec = round(float(getattr(result, 'processing_time', 0.0)), 1)
-        wall_sec = round(time.time() - t0, 1)
-        word_count = len(words) or len(raw_text.split())
-        if is_real:
-            title = '# 真人测试 · 第%d周 问题%d · 转写稿' % (week, q)
-        else:
-            title = '# 第%d周 问题%d · 测试长者001 · 转写稿' % (week, q)
-        header = [
-            title,
-            '',
-            '> 来源录音：`tests/fixtures/%s`' % f.name,
-            '> 转写方式：CrisperWhisper 2.0（模型 %s，语言 %s，verbatim 逐字模式，continuation 分段，CPU）' % (MODEL_SIZE, LANGUAGE),
-            '> 转写规则：逐字保留口头禅、语气词、重复、说一半的话；不修正语法、不润色、不删除跑题内容。',
-            '> 停顿用「……」标注；情绪用 [笑] [叹气] 等方括号标注；方言词原样保留。',
-            '',
-        ]
-        body = '\n\n'.join('%s %s' % (ts, text) for ts, text in lines)
-        footer = [
-            '',
-            '---',
-            '',
-            '转写信息：音频时长 %s 秒 ｜ 模型处理耗时 %s 秒 ｜ 脚本总耗时 %s 秒 ｜ 词数 %d ｜ 分段数 %d。' % (
-                audio_sec, proc_sec, wall_sec, word_count, len(chunks)),
-            '',
-        ]
-        if fffd:
-            footer.insert(-1, '> ⚠️ 本稿含 %d 处无法解码的字符，已用「□」标出，建议人工复核对应位置。' % fffd)
-            footer.insert(-1, '')
-        target.write_text(
-            '\n'.join(header) + body + '\n'.join(footer),
-            encoding='utf-8',
-        )
-        metrics['audio_to_text'].append({
-            'audio': f.name,
-            'transcript': target.name,
-            'audio_duration_sec': audio_sec,
-            'model_processing_sec': proc_sec,
-            'duration_sec': wall_sec,
-            'word_count': word_count,
-            'chunks': len(chunks),
-            'fffd_count': fffd,
-            'transcript_bytes': target.stat().st_size,
-        })
-        save_metrics(metrics)
-        print('完成:', target.name, '| 模型耗时', proc_sec, '秒 | 总耗时', wall_sec, '秒 | 词数', word_count, '| FFFD', fffd)
+        transcribe_one(model, f, target, title, src_label, metrics)
         done_any = True
     if not done_any:
         print('无新录音需要转写。')
